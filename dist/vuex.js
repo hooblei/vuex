@@ -62,12 +62,14 @@
     }
   }
 
-  function mapState(map) {
+  function mapState(states) {
     var res = {};
-    Object.keys(map).forEach(function (key) {
-      var fn = map[key];
+    normalizeMap(states).forEach(function (_ref) {
+      var key = _ref.key;
+      var val = _ref.val;
+
       res[key] = function mappedState() {
-        return fn.call(this, this.$store.state, this.$store.getters);
+        return typeof val === 'function' ? val.call(this, this.$store.state, this.$store.getters) : this.$store.state[val];
       };
     });
     return res;
@@ -75,9 +77,9 @@
 
   function mapMutations(mutations) {
     var res = {};
-    normalizeMap(mutations).forEach(function (_ref) {
-      var key = _ref.key;
-      var val = _ref.val;
+    normalizeMap(mutations).forEach(function (_ref2) {
+      var key = _ref2.key;
+      var val = _ref2.val;
 
       res[key] = function mappedMutation() {
         var _$store;
@@ -94,13 +96,13 @@
 
   function mapGetters(getters) {
     var res = {};
-    normalizeMap(getters).forEach(function (_ref2) {
-      var key = _ref2.key;
-      var val = _ref2.val;
+    normalizeMap(getters).forEach(function (_ref3) {
+      var key = _ref3.key;
+      var val = _ref3.val;
 
       res[key] = function mappedGetter() {
         if (!(val in this.$store.getters)) {
-          console.error("[vuex] unknown getter: " + val);
+          console.error('[vuex] unknown getter: ' + val);
         }
         return this.$store.getters[val];
       };
@@ -110,9 +112,9 @@
 
   function mapActions(actions) {
     var res = {};
-    normalizeMap(actions).forEach(function (_ref3) {
-      var key = _ref3.key;
-      var val = _ref3.val;
+    normalizeMap(actions).forEach(function (_ref4) {
+      var key = _ref4.key;
+      var val = _ref4.val;
 
       res[key] = function mappedAction() {
         var _$store2;
@@ -179,8 +181,6 @@
 
       var _options$state = options.state;
       var state = _options$state === undefined ? {} : _options$state;
-      var _options$modules = options.modules;
-      var modules = _options$modules === undefined ? {} : _options$modules;
       var _options$plugins = options.plugins;
       var plugins = _options$plugins === undefined ? [] : _options$plugins;
       var _options$strict = options.strict;
@@ -192,6 +192,7 @@
       this._committing = false;
       this._actions = Object.create(null);
       this._mutations = Object.create(null);
+      this._wrappedGetters = Object.create(null);
       this._subscribers = [];
       this._pendingActions = [];
 
@@ -207,15 +208,16 @@
         return commit.call(store, type, payload);
       };
 
-      // init state and getters
-      var getters = extractModuleGetters(options.getters, modules);
-      initStoreState(this, state, getters);
+      // strict mode
+      this.strict = strict;
+
+      // init internal vm with root state
+      // other options and sub modules will be
+      // initialized in this.module method
+      initStoreVM(this, state, {});
 
       // apply root module
       this.module([], options);
-
-      // strict mode
-      if (strict) enableStrictMode(this);
 
       // apply plugins
       plugins.concat(devtoolPlugin).forEach(function (plugin) {
@@ -233,44 +235,14 @@
     }, {
       key: 'module',
       value: function module(path, _module, hot) {
-        var _this2 = this;
-
         this._committing = true;
         if (typeof path === 'string') path = [path];
         assert(Array.isArray(path), 'module path must be a string or an Array.');
 
-        var isRoot = !path.length;
-        var state = _module.state;
-        var actions = _module.actions;
-        var mutations = _module.mutations;
-        var modules = _module.modules;
+        initModule(this, path, _module, hot);
 
-        // set state
+        initStoreVM(this, this.state, this._wrappedGetters);
 
-        if (!isRoot && !hot) {
-          var parentState = getNestedState(this.state, path.slice(0, -1));
-          if (!parentState) debugger;
-          var moduleName = path[path.length - 1];
-          Vue.set(parentState, moduleName, state || {});
-        }
-
-        if (mutations) {
-          Object.keys(mutations).forEach(function (key) {
-            _this2.mutation(key, mutations[key], path);
-          });
-        }
-
-        if (actions) {
-          Object.keys(actions).forEach(function (key) {
-            _this2.action(key, actions[key], path);
-          });
-        }
-
-        if (modules) {
-          Object.keys(modules).forEach(function (key) {
-            _this2.module(path.concat(key), modules[key], hot);
-          });
-        }
         this._committing = false;
       }
     }, {
@@ -318,7 +290,7 @@
     }, {
       key: 'commit',
       value: function commit(type, payload) {
-        var _this3 = this;
+        var _this2 = this;
 
         // check object-style commit
         var mutation = void 0;
@@ -340,7 +312,7 @@
         this._committing = false;
         if (!payload || !payload.silent) {
           this._subscribers.forEach(function (sub) {
-            return sub(mutation, _this3.state);
+            return sub(mutation, _this2.state);
           });
         }
       }
@@ -384,20 +356,19 @@
     }, {
       key: 'watch',
       value: function watch(getter, cb, options) {
-        var _this4 = this;
+        var _this3 = this;
 
         assert(typeof getter === 'function', 'store.watch only accepts a function.');
         return this._vm.$watch(function () {
-          return getter(_this4.state);
+          return getter(_this3.state);
         }, cb, options);
       }
     }, {
       key: 'hotUpdate',
       value: function hotUpdate(newOptions) {
-        var _this5 = this;
-
         this._actions = Object.create(null);
         this._mutations = Object.create(null);
+        this._wrappedGetters = Object.create(null);
         var options = this._options;
         if (newOptions.actions) {
           options.actions = newOptions.actions;
@@ -405,32 +376,15 @@
         if (newOptions.mutations) {
           options.mutations = newOptions.mutations;
         }
+        if (newOptions.getters) {
+          options.getters = newOptions.getters;
+        }
         if (newOptions.modules) {
           for (var key in newOptions.modules) {
             options.modules[key] = newOptions.modules[key];
           }
         }
         this.module([], options, true);
-
-        // update getters
-        var getters = extractModuleGetters(newOptions.getters, newOptions.modules);
-        if (Object.keys(getters).length) {
-          (function () {
-            var oldVm = _this5._vm;
-            initStoreState(_this5, _this5.state, getters);
-            if (_this5.strict) {
-              enableStrictMode(_this5);
-            }
-            // dispatch changes in all subscribed watchers
-            // to force getter re-evaluation.
-            _this5._committing = true;
-            oldVm.state = null;
-            _this5._committing = false;
-            Vue.nextTick(function () {
-              return oldVm.$destroy();
-            });
-          })();
-        }
       }
     }, {
       key: 'state',
@@ -448,7 +402,9 @@
     if (!condition) throw new Error('[vuex] ' + msg);
   }
 
-  function initStoreState(store, state, getters) {
+  function initStoreVM(store, state, getters) {
+    var oldVm = store._vm;
+
     // bind getters
     store.getters = {};
     var computed = {};
@@ -475,34 +431,68 @@
       computed: computed
     });
     Vue.config.silent = silent;
+
+    // enable strict mode for new vm
+    if (store.strict) {
+      enableStrictMode(store);
+    }
+
+    if (oldVm) {
+      // dispatch changes in all subscribed watchers
+      // to force getter re-evaluation.
+      store._committing = true;
+      oldVm.state = null;
+      store._committing = false;
+      Vue.nextTick(function () {
+        return oldVm.$destroy();
+      });
+    }
   }
 
-  function extractModuleGetters() {
-    var getters = arguments.length <= 0 || arguments[0] === undefined ? {} : arguments[0];
-    var modules = arguments.length <= 1 || arguments[1] === undefined ? {} : arguments[1];
-    var path = arguments.length <= 2 || arguments[2] === undefined ? [] : arguments[2];
+  function initModule(store, path, module, hot) {
+    var isRoot = !path.length;
+    var state = module.state;
+    var actions = module.actions;
+    var mutations = module.mutations;
+    var getters = module.getters;
+    var modules = module.modules;
 
-    if (!path.length) {
-      wrapGetters(getters, getters, path, true);
+    // set state
+
+    if (!isRoot && !hot) {
+      var parentState = getNestedState(store.state, path.slice(0, -1));
+      if (!parentState) debugger;
+      var moduleName = path[path.length - 1];
+      Vue.set(parentState, moduleName, state || {});
     }
-    if (!modules) {
-      return getters;
+
+    if (mutations) {
+      Object.keys(mutations).forEach(function (key) {
+        store.mutation(key, mutations[key], path);
+      });
     }
-    Object.keys(modules).forEach(function (key) {
-      var module = modules[key];
-      var modulePath = path.concat(key);
-      if (module.getters) {
-        wrapGetters(getters, module.getters, modulePath);
-      }
-      extractModuleGetters(getters, module.modules, modulePath);
-    });
-    return getters;
+
+    if (actions) {
+      Object.keys(actions).forEach(function (key) {
+        store.action(key, actions[key], path);
+      });
+    }
+
+    if (getters) {
+      wrapGetters(store._wrappedGetters, getters, path);
+    }
+
+    if (modules) {
+      Object.keys(modules).forEach(function (key) {
+        initModule(store, path.concat(key), modules[key], hot);
+      });
+    }
   }
 
-  function wrapGetters(getters, moduleGetters, modulePath, force) {
+  function wrapGetters(getters, moduleGetters, modulePath) {
     Object.keys(moduleGetters).forEach(function (getterKey) {
       var rawGetter = moduleGetters[getterKey];
-      if (getters[getterKey] && !force) {
+      if (getters[getterKey]) {
         console.error('[vuex] duplicate getter key: ' + getterKey);
         return;
       }
